@@ -2330,7 +2330,7 @@ void jl_get_llvmf_defn_impl(jl_llvmf_dump_t* dump, jl_method_instance_t *mi, jl_
             output.imaging_mode = jl_options.image_codegen;
             output.temporary_roots = jl_alloc_array_1d(jl_array_any_type, 0);
             JL_GC_PUSH1(&output.temporary_roots);
-            auto decls = jl_emit_code(m, mi, src, NULL, output);
+            auto decls = jl_emit_code(m, mi, src, mi->specTypes, src->rettype, output);
             emit_always_inline(m, output);
             output.workqueue.clear();
             output.temporary_roots = nullptr;
