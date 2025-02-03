@@ -689,6 +689,10 @@ U41096 = Term41096{:U}(Modulate41096(:U, false))
 
 # test that we can start julia with libjulia-codegen removed; PR #41936
 mktempdir() do pfx
+    # First check that ordinary running won't try to compile things. If it does that indicates an insufficient precompile or invalidation.
+    @test success(`$(Base.julia_cmd()) --startup-file=no --trace-compile="$(pfx)/compiles.txt" -e 'print("no codegen!\n")'`)
+    @test !isfile(joinpath(pfx, "compiles.txt"))
+
     cp(dirname(Sys.BINDIR), pfx; force=true)
     libpath = relpath(dirname(dlpath(libjulia_codegen_name())), dirname(Sys.BINDIR))
     libs_deleted = 0
