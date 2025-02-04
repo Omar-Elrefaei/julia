@@ -1293,7 +1293,9 @@ function _include_from_serialized(pkg::PkgId, path::String, ocachepath::Union{No
 
         edges = sv[3]::Vector{Any}
         ext_edges = sv[4]::Union{Nothing,Vector{Any}}
-        StaticData.insert_backedges(edges, ext_edges)
+        extext_methods = sv[5]::Vector{Any}
+        internal_methods = sv[6]::Vector{Any}
+        StaticData.insert_backedges(edges, ext_edges, extext_methods, internal_methods)
 
         restored = register_restored_modules(sv, pkg, path)
 
@@ -1389,7 +1391,7 @@ function register_restored_modules(sv::SimpleVector, pkg::PkgId, path::String)
     restored = sv[1]::Vector{Any}
     for M in restored
         M = M::Module
-        if isdefined(M, Base.Docs.META) && getfield(M, Base.Docs.META) !== nothing
+        if isdefinedglobal(M, Base.Docs.META)
             push!(Base.Docs.modules, M)
         end
         if is_root_module(M)
@@ -2364,6 +2366,18 @@ function require(into::Module, mod::Symbol)
     return invoke_in_world(world, __require, into, mod)
 end
 
+function check_for_hint(into, mod)
+    return begin
+        if isdefined(into, mod) && getfield(into, mod) isa Module
+            true, "."
+        elseif isdefined(parentmodule(into), mod) && getfield(parentmodule(into), mod) isa Module
+            true, ".."
+        else
+            false, ""
+        end
+    end
+end
+
 function __require(into::Module, mod::Symbol)
     if into === __toplevel__ && generating_output(#=incremental=#true)
         error("`using/import $mod` outside of a Module detected. Importing a package outside of a module \
@@ -2377,15 +2391,7 @@ function __require(into::Module, mod::Symbol)
         if uuidkey_env === nothing
             where = PkgId(into)
             if where.uuid === nothing
-                hint, dots = begin
-                    if isdefined(into, mod) && getfield(into, mod) isa Module
-                        true, "."
-                    elseif isdefined(parentmodule(into), mod) && getfield(parentmodule(into), mod) isa Module
-                        true, ".."
-                    else
-                        false, ""
-                    end
-                end
+                hint, dots = invokelatest(check_for_hint, into, mod)
                 hint_message = hint ? ", maybe you meant `import/using $(dots)$(mod)`" : ""
                 install_message = if mod != :Pkg
                     start_sentence = hint ? "Otherwise, run" : "Run"
@@ -3072,7 +3078,10 @@ function create_expr_cache(pkg::PkgId, input::String, output::String, output_o::
         cpu_target = nothing
     end
     push!(opts, "--output-ji", output)
-    isassigned(PRECOMPILE_TRACE_COMPILE) && push!(opts, "--trace-compile=$(PRECOMPILE_TRACE_COMPILE[])")
+    if isassigned(PRECOMPILE_TRACE_COMPILE)
+        push!(opts, "--trace-compile=$(PRECOMPILE_TRACE_COMPILE[])")
+        push!(opts, "--trace-compile-timing")
+    end
 
     io = open(pipeline(addenv(`$(julia_cmd(;cpu_target)::Cmd)
                                $(flags)

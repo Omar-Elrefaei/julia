@@ -939,6 +939,7 @@ static void jl_insert_into_serialization_queue(jl_serializer_state *s, jl_value_
                     record_field_change((jl_value_t**)&ci->inferred, jl_nothing);
                 }
                 else if (native_functions && // don't delete any code if making a ji file
+                         (ci->owner == jl_nothing) && // don't delete code for external interpreters
                          !effects_foldable(jl_atomic_load_relaxed(&ci->ipo_purity_bits)) && // don't delete code we may want for irinterp
                          jl_ir_inlining_cost(inferred) == UINT16_MAX) { // don't delete inlineable code
                     // delete the code now: if we thought it was worth keeping, it would have been converted to object code
@@ -1674,8 +1675,26 @@ static void jl_write_values(jl_serializer_state *s) JL_GC_DISABLED
 #ifndef _P64
             write_uint(f, decode_restriction_kind(pku));
 #endif
-            write_uint(f, bpart->min_world);
-            write_uint(f, jl_atomic_load_relaxed(&bpart->max_world));
+            size_t max_world = jl_atomic_load_relaxed(&bpart->max_world);
+            if (s->incremental) {
+                if (max_world == ~(size_t)0) {
+                    // Still valid. Will be considered to be defined in jl_require_world
+                    // after reload, which is the first world before new code runs.
+                    // We use this as a quick check to determine whether a binding was
+                    // invalidated. If a binding was first defined in or before
+                    // jl_require_world, then we can assume that all precompile processes
+                    // will have seen it consistently.
+                    write_uint(f, jl_require_world);
+                    write_uint(f, max_world);
+                } else {
+                    // The world will not be reachable after loading
+                    write_uint(f, 1);
+                    write_uint(f, 0);
+                }
+            } else {
+                write_uint(f, bpart->min_world);
+                write_uint(f, max_world);
+            }
             write_pointerfield(s, (jl_value_t*)jl_atomic_load_relaxed(&bpart->next));
 #ifdef _P64
             write_uint(f, decode_restriction_kind(pku)); // This will be moved back into place during deserialization (if necessary)
@@ -2613,7 +2632,6 @@ static void strip_specializations_(jl_method_instance_t *mi)
         if (inferred && inferred != jl_nothing) {
             if (jl_options.strip_ir) {
                 record_field_change((jl_value_t**)&codeinst->inferred, jl_nothing);
-                record_field_change((jl_value_t**)&codeinst->edges, (jl_value_t*)jl_emptysvec);
             }
             else if (jl_options.strip_metadata) {
                 jl_value_t *stripped = strip_codeinfo_meta(mi->def.method, inferred, codeinst);
@@ -2622,6 +2640,8 @@ static void strip_specializations_(jl_method_instance_t *mi)
                 }
             }
         }
+        if (jl_options.strip_ir)
+            record_field_change((jl_value_t**)&codeinst->edges, (jl_value_t*)jl_emptysvec);
         if (jl_options.strip_metadata)
             record_field_change((jl_value_t**)&codeinst->debuginfo, (jl_value_t*)jl_nulldebuginfo);
         codeinst = jl_atomic_load_relaxed(&codeinst->next);
@@ -2714,7 +2734,6 @@ static void jl_strip_all_codeinfos(void)
 jl_genericmemory_t *jl_global_roots_list;
 jl_genericmemory_t *jl_global_roots_keyset;
 jl_mutex_t global_roots_lock;
-extern jl_mutex_t world_counter_lock;
 
 jl_mutex_t precompile_field_replace_lock;
 jl_svec_t *precompile_field_replace JL_GLOBALLY_ROOTED;
@@ -4130,7 +4149,7 @@ static jl_value_t *jl_restore_package_image_from_stream(void* pkgimage_handle, i
                                                    extext_methods, method_roots_list, cachesizes_sv);
             }
             else {
-                restored = (jl_value_t*)jl_svec(4, restored, init_order, edges, ext_edges);
+                restored = (jl_value_t*)jl_svec(6, restored, init_order, edges, ext_edges, extext_methods, internal_methods);
             }
         }
     }
