@@ -2185,17 +2185,21 @@ bool LateLowerGCFrame::CleanupIR(Function &F, State *S, bool *CFGModified) {
                 if (CI->getFnAttr("julia.gc_safe").isValid()) {
                     // Insert the operations to switch to gc_safe if necessary.
                     IRBuilder<> builder(CI);
-                    Value *pgcstack = getPGCstack(F);
+                    Value *pgcstack = getOrAddPGCstack(F);
                     assert(pgcstack);
+                    // We dont use emit_state_set here because safepoints are unconditional for any code that reaches this
+                    // We are basically guaranteed to go from gc_unsafe to gc_safe and back, and both transitions need a safepoint
+                    // We also can't add any BBs here, so just avoiding the branches is good
                     Value *ptls = get_current_ptls_from_task(builder, get_current_task_from_pgcstack(builder, pgcstack), tbaa_gcframe);
-                    Value *last_gc_state = emit_gc_safe_enter(builder, T_size, ptls, false);
-                    builder.SetInsertPoint(CI->getNextNode());
-                    // Can't use `emit_gc_safe_leave` since that wan'ts to emit some new BB, and we are currently iterating over those.
                     unsigned offset = offsetof(jl_tls_states_t, gc_state);
-                    Value *gc_state = builder.CreateConstInBoundsGEP1_32(last_gc_state->getType(), ptls, offset, "gc_state");
-                    builder.CreateAlignedStore(last_gc_state, gc_state, Align(sizeof(void*)))->setOrdering(AtomicOrdering::Release);
+                    Value *gc_state = builder.CreateConstInBoundsGEP1_32(Type::getInt8Ty(builder.getContext()), ptls, offset, "gc_state");
+                    LoadInst *last_gc_state = builder.CreateAlignedLoad(Type::getInt8Ty(builder.getContext()), gc_state, Align(sizeof(void*)));
+                    last_gc_state->setOrdering(AtomicOrdering::Monotonic);
+                    builder.CreateAlignedStore(builder.getInt8(JL_GC_STATE_SAFE), gc_state, Align(sizeof(void*)))->setOrdering(AtomicOrdering::Release);
                     MDNode *tbaa = get_tbaa_const(builder.getContext());
-                    // unconditional safepoint due to branches
+                    emit_gc_safepoint(builder, T_size, ptls, tbaa, false);
+                    builder.SetInsertPoint(CI->getNextNode());
+                    builder.CreateAlignedStore(last_gc_state, gc_state, Align(sizeof(void*)))->setOrdering(AtomicOrdering::Release);
                     emit_gc_safepoint(builder, T_size, ptls, tbaa, false);
                 }
                 if (CI->arg_size() == CI->getNumOperands()) {
